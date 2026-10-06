@@ -215,6 +215,8 @@ export type ReactiveEventKind = "at_limit" | "stream_failure" | "stop_error";
 export interface ReactiveEventInput {
   provider: ProviderKind;
   accountRef: string;
+  /** The seat whose structured runtime event produced this signal. */
+  seatSession?: string;
   kind: ReactiveEventKind;
   asOf: string;
   // Required: a reactive event without a freshness bound could never pass BR-2, and a momentary
@@ -226,6 +228,7 @@ export function reactiveEventSignal(input: ReactiveEventInput): ProviderSignal {
   return {
     provider: input.provider,
     accountRef: input.accountRef,
+    ...(input.seatSession ? { seatSession: input.seatSession } : {}),
     sourceClass: "provider_event",
     authority: "reactive_error",
     asOf: input.asOf,

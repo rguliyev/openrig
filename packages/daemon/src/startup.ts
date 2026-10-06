@@ -1179,7 +1179,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     snapshotCapture,
     snapshotRepo,
     // Slice-04 OPR.0.5.0.4: production provider service — getReadModel over the codex-auth reader
-    // + node-inventory across rigs; precheck via the pure gate; switch honest-interim (D seam).
+    // + node-inventory across rigs; precheck via the pure gate; auth switch + audit events.
     // C3: the Claude statusline provider_usage cache lane. Cache files are seat-keyed and the
     // reader normalizes valid subscription windows. Live-seat fallback is owned by provider-collect.
     providerService: new ProviderServiceImpl({
@@ -1191,6 +1191,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         legacyProviderUsageDirectory(OPENRIG_HOME),
       ),
       agentActivityStore,
+      eventBus,
     }),
     restoreOrchestrator,
     resumeMetadataRefresher, // OPR.0.4.3.20 FR-4 — manual snapshot refresh-before-serialize

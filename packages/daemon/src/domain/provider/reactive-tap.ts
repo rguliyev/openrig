@@ -149,6 +149,7 @@ export function collectReactiveEventSignals(deps: ReactiveTapDeps): ReactiveTapR
     signals.push(reactiveEventSignal({
       provider: "codex",
       accountRef,
+      seatSession: seat.seatSession,
       kind,
       asOf: eventAt,
       staleAfter: new Date(staleAfterMs).toISOString(),

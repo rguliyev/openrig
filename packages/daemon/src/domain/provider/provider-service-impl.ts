@@ -1,8 +1,8 @@
 // Slice-04 (OPR.0.5.0.4) C1 (resume) — the production ProviderService. getReadModel is fully
 // wired over the collection seam (real codex-auth reader + node-inventory across rigs + clock).
 // precheck composes the pure precheckSwitch gate (fails closed on unknown auth per BR-3). switch
-// is precheck-gated and NEVER fabricates success — the switch-execution + BR-1 action-record path
-// is the D seam; until it lands, switch returns an honest failed_safely with an operational reason.
+// validates the saved profile at use, atomically activates it, updates the seat binding metadata,
+// and writes request/completion events around the mutation.
 
 import type Database from "better-sqlite3";
 import {
@@ -14,6 +14,8 @@ import { readCodexAuthMetadata, type CodexAuthMetadata } from "./codex-auth-read
 import { collectFourBlockReadModel, type ProviderSeat } from "./provider-collect.js";
 import { precheckSwitch } from "./provider-policy.js";
 import { collectReactiveEventSignals } from "./reactive-tap.js";
+import { createCodexProfileStore, type CodexProfileStore } from "./codex-profile-store.js";
+import type { EventBus } from "../event-bus.js";
 import type {
   ProviderService,
   ProviderPrecheckInput,
@@ -30,6 +32,8 @@ export interface ProviderServiceImplDeps {
   collectClaudeSignals?: () => ProviderSignal[];
   /** Slice-04 C4: the shipped structured activity detector. Undefined keeps the reactive lane empty. */
   agentActivityStore?: Pick<AgentActivityStore, "getLatestForNode">;
+  authProfileStore?: CodexProfileStore;
+  eventBus?: Pick<EventBus, "emit">;
   /** W2a tap: operator-visible disposition sink. Observability only; never a verification producer. */
   warn?: (message: string) => void;
   env?: NodeJS.ProcessEnv;
@@ -72,14 +76,17 @@ export class ProviderServiceImpl implements ProviderService {
     });
   }
 
-  private listSeats(): ProviderSeat[] {
-    const seats: ProviderSeat[] = [];
+  private listSeats(): Array<ProviderSeat & { nodeId: string; rigId: string; cwd: string }> {
+    const seats: Array<ProviderSeat & { nodeId: string; rigId: string; cwd: string }> = [];
     for (const rig of this.deps.listRigs()) {
       for (const entry of getNodeInventory(this.deps.db, rig.id)) {
         if (!entry.canonicalSessionName) continue;
         seats.push({
+          nodeId: entry.nodeId,
+          rigId: entry.rigId,
           seatSession: entry.canonicalSessionName,
           rigName: entry.rigName ?? "",
+          cwd: entry.cwd ?? "unknown",
           runtime: entry.runtime ?? "unknown",
           lifecycleState: entry.lifecycleState,
         });
@@ -89,28 +96,91 @@ export class ProviderServiceImpl implements ProviderService {
   }
 
   async precheck(input: ProviderPrecheckInput): Promise<PrecheckResult> {
-    const model = await this.getReadModel();
-    const target = model.accounts.find((a) => a.accountId === input.toAccount);
-    // Validate-at-use: an unknown target OR unknown auth fails closed (BR-3 — disk presence never
-    // asserts active). Live-conversation state is not yet wired (the C2 activity seam), so assume
-    // live — the conservative direction never strands a conversation silently. This is the MANUAL
-    // precheck variant (no triggeringSignal; that's for automated policy-driven switches).
+    const seat = this.listSeats().find((candidate) => candidate.seatSession === input.seat);
+    if (!seat) return { safe: false, reasons: ["seat_not_found"] };
+    const store = this.deps.authProfileStore ?? createCodexProfileStore(this.deps.env ?? process.env);
+    const activity = this.deps.agentActivityStore?.getLatestForNode({
+      sessionName: seat.seatSession,
+      now: new Date((this.deps.now ?? (() => new Date().toISOString()))()),
+    });
+    const interruptedAtLimit = activity?.stale !== true
+      && activity?.generationProvenance === "resolved"
+      && ["at_limit", "rate_limit", "rate_limited"].includes(activity.rawEvent ?? "");
+    // A non-running seat has no live conversation. For a running seat, a fresh, generation-resolved
+    // idle hook is positive evidence of safety. A typed at-limit interruption is also releasable: the
+    // provider has already stopped the turn, and the caller must hand it over when rebind is pending.
+    const seatHasLiveConversation = seat.lifecycleState === "running"
+      && !interruptedAtLimit
+      && !(activity?.state === "idle" && activity.stale !== true && activity.generationProvenance !== "unresolved");
     return precheckSwitch({
-      targetProvider: target?.provider ?? "codex",
-      targetAuthState: target?.authState ?? "unknown",
-      seatHasLiveConversation: true,
+      targetProvider: seat.runtime === "codex" ? "codex" : "claude",
+      targetAuthState: store.inspect(input.toAccount),
+      seatHasLiveConversation,
     });
   }
 
   async switchAccount(input: ProviderSwitchInput): Promise<ProviderSwitchResult> {
     // Precheck-gate: never switch past an unsafe verdict unless explicitly forced.
     const verdict = await this.precheck({ seat: input.seat, toAccount: input.toAccount });
-    if (verdict.safe === false && !input.forceUnsafe) {
+    // `--force-unsafe` may override auth uncertainty, but never the stranding guard.
+    if (verdict.safe === false && (!input.forceUnsafe || verdict.reasons.includes("would_strand_live_conversation"))) {
       const reasons = verdict.reasons.length > 0 ? verdict.reasons : ["precheck_unsafe"];
       return { outcome: "failed_safely", reasons: reasons as [string, ...string[]] };
     }
-    // D seam (compose the rig-auth codex switch + BR-1 durable action record) is NOT yet wired.
-    // Honest operational failure — never fabricate a succeeded/rebind_in_progress outcome.
-    return { outcome: "failed_safely", reasons: ["switch_execution_not_yet_wired"] };
+    const seat = this.listSeats().find((candidate) => candidate.seatSession === input.seat);
+    if (!seat) return { outcome: "failed_safely", reasons: ["seat_not_found"] };
+    const now = (this.deps.now ?? (() => new Date().toISOString()))();
+    if (!this.deps.eventBus) {
+      return { outcome: "failed_safely", reasons: ["switch_action_record_unavailable"] };
+    }
+    try {
+      this.deps.eventBus.emit({
+        type: "provider.account_switch_requested",
+        rigId: seat.rigId,
+        nodeId: seat.nodeId,
+        seat: seat.seatSession,
+        toAccount: input.toAccount,
+        requestedAt: now,
+      });
+    } catch {
+      return { outcome: "failed_safely", reasons: ["switch_action_record_failed"] };
+    }
+    const store = this.deps.authProfileStore ?? createCodexProfileStore(this.deps.env ?? process.env);
+    const switched = store.switchAndBind({
+      name: input.toAccount,
+      seat: seat.seatSession,
+      rig: seat.rigName,
+      cwd: seat.cwd,
+      switchedAt: now,
+    });
+    if (!switched.ok) {
+      try {
+        this.deps.eventBus.emit({
+          type: "provider.account_switch_failed",
+          rigId: seat.rigId,
+          nodeId: seat.nodeId,
+          seat: seat.seatSession,
+          toAccount: input.toAccount,
+          failedAt: now,
+          reason: switched.reason,
+        });
+      } catch { /* the durable request event still records the attempted action */ }
+      return { outcome: "failed_safely", reasons: [switched.reason] };
+    }
+    try {
+      this.deps.eventBus.emit({
+        type: "provider.account_switch_completed",
+        rigId: seat.rigId,
+        nodeId: seat.nodeId,
+        seat: seat.seatSession,
+        toAccount: input.toAccount,
+        completedAt: now,
+        effect: "future_launches_only",
+      });
+    } catch {
+      // The requested event is already durable. The auth switch is not rolled back after a completed
+      // atomic publish; report the true operational state instead of claiming no switch happened.
+    }
+    return seat.lifecycleState === "running" ? { outcome: "rebind_in_progress" } : { outcome: "succeeded" };
   }
 }

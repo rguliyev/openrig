@@ -107,6 +107,9 @@ export interface Session {
 
 export type RigEvent =
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
+  | { type: "provider.account_switch_requested"; rigId: string; nodeId: string; seat: string; toAccount: string; requestedAt: string }
+  | { type: "provider.account_switch_completed"; rigId: string; nodeId: string; seat: string; toAccount: string; completedAt: string; effect: "future_launches_only" }
+  | { type: "provider.account_switch_failed"; rigId: string; nodeId: string; seat: string; toAccount: string; failedAt: string; reason: string }
   | { type: "event.delivery_poisoned"; poisonedSeq: number; error: string; payloadSha: string }
   | { type: "rig.created"; rigId: string }
   // B8 / slice-07 A3 — the durable model-divergence proclamation record: effective vs pinned at the

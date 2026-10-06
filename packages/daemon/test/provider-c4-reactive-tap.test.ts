@@ -183,6 +183,7 @@ describe("W2a tap — provenance disposition routing", () => {
     expect(result.signals).toEqual([{
       provider: "codex",
       accountRef: ACCOUNT,
+      seatSession: SESSION,
       sourceClass: "provider_event",
       authority: "reactive_error",
       asOf: EVENT_AT,
@@ -283,6 +284,7 @@ describe("Slice-04 C4 — production reactive activity tap", () => {
     expect(model.signals).toEqual([{
       provider: "codex",
       accountRef: ACCOUNT,
+      seatSession: SESSION,
       sourceClass: "provider_event",
       authority: "reactive_error",
       asOf: EVENT_AT,
@@ -492,6 +494,7 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
     expect(reactiveRows(await fx.service.getReadModel())).toEqual([{
       provider: "codex",
       accountRef: ACCOUNT,
+      seatSession: SESSION,
       sourceClass: "provider_event",
       authority: "reactive_error",
       asOf: EVENT_AT,

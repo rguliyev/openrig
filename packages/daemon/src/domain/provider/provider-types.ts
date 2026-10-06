@@ -123,6 +123,7 @@ export interface ProviderSignal {
 
 // precheck / switch (§1 + §3)
 export type PrecheckReason =
+  | "seat_not_found"
   | "would_strand_live_conversation"
   | "target_needs_reauth" // target authState === "needs_reauth"
   | "target_auth_unknown" // target authState === "unknown" — fails closed, NOT relabeled as re-auth
